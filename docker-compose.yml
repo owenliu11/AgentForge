@@ -1,3 +1,6 @@
+# Fixed project name so every checkout/worktree manages the same container and volume.
+name: agentforge
+
 services:
   db:
     image: postgres:16

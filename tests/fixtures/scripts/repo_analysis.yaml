@@ -1,0 +1,22 @@
+- tool: files.read
+  args:
+    path: README.md
+
+- tool: files.search
+  args:
+    path: "."
+    pattern: "unittest"
+
+- tool: tests.run
+  args:
+    path: "."
+
+- tool: report.publish
+  args:
+    path: "report.md"
+    title: "Fixture repo test report"
+    include_last_result: true
+
+- finish:
+    result:
+      summary: "Ran the fixture repo's tests and published a report."
