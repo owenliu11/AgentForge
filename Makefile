@@ -10,7 +10,7 @@ export UV_PROJECT_ENVIRONMENT ?= $(HOME)/.venvs/agentforge
 export PYTHONPYCACHEPREFIX ?= $(HOME)/.cache/agentforge/pycache
 endif
 
-.PHONY: help install up up-all down reset-db ps migrate run worker mock demo test drill lint format fix health clean
+.PHONY: help install up up-all down reset-db ps migrate run worker mock demo test drill measure lint format fix health clean
 
 help:
 	@echo "AgentForge targets"
@@ -28,6 +28,7 @@ help:
 	@echo "  make demo      Open the demo site at localhost:8000/demo"
 	@echo "  make test      Run unit and lease tests"
 	@echo "  make drill     Run kill drills (real worker processes)"
+	@echo "  make measure   Measure recovery time over 20 crashes"
 	@echo "  make lint      Run ruff"
 	@echo "  make format    Format code with ruff"
 	@echo "  make fix       Auto-fix lint issues and format"
@@ -79,6 +80,9 @@ test:
 
 drill:
 	uv run pytest drills -v
+
+measure:
+	PYTHONPATH=. uv run python drills/measure_recovery.py
 
 lint:
 	uv run ruff check .

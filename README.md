@@ -59,6 +59,16 @@ Both truncate the tables in `DATABASE_URL`. If your local database predates Phas
 
 Drills use a 2 s lease (`LEASE_SECONDS`) so they run in about 30 seconds.
 
+### Recovery time
+
+Measured with `make measure`: the `after_effect` crash, repeated 20 times with real worker processes, from the worker's death to the next worker's claim, using the database clock. Raw samples are in [drills/results/recovery.json](drills/results/recovery.json).
+
+| Lease | Runs | p50 | p95 | Max | Extra reports applied |
+|---|---|---|---|---|---|
+| 2 s | 20 | 2.01 s | 2.03 s | 2.04 s | 0 |
+
+Recovery time tracks the lease length, because the next worker can only claim once the lease expires. With the default 30 s lease, expect about 30 s. A shorter lease recovers faster, but a brief stall is more likely to trigger an unnecessary takeover. Measured on a local machine.
+
 ## Design
 
 ### Claim, heartbeat, fence
