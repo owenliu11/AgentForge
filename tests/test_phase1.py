@@ -1,17 +1,18 @@
 # tests/test_phase1.py
 from pathlib import Path
 
+import httpx
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import select
 
 from app.agent import create_run, run_agent
 from app.db import SessionLocal
 from app.main import app
 from app.model_interface import Model
-from app.models import AgentRun, RunEvent, RunStep, ToolCall
 from app.state_machine import IllegalTransition, transition
 from app.tools import ToolContext, ToolError, execute_tool
+from app.worker import drain
+from tests.support import load_run
 
 ROOT = Path(__file__).resolve().parents[1]
 FIXTURE_REPO = ROOT / "tests" / "fixtures" / "sample_repo"
@@ -36,21 +37,6 @@ class TraversalModel(Model):
                 "args": {"path": "../../etc/passwd"},
             }
         return {"action": "finish", "result": {}}
-
-
-def load_run(run_id):
-    with SessionLocal() as session:
-        run = session.get(AgentRun, run_id)
-        steps = session.scalars(
-            select(RunStep).where(RunStep.run_id == run_id).order_by(RunStep.seq)
-        ).all()
-        calls = session.scalars(
-            select(ToolCall).where(ToolCall.run_id == run_id).order_by(ToolCall.step_seq)
-        ).all()
-        events = session.scalars(
-            select(RunEvent).where(RunEvent.run_id == run_id).order_by(RunEvent.seq)
-        ).all()
-    return run, steps, calls, events
 
 
 def test_illegal_transitions_raise():
@@ -169,18 +155,21 @@ def test_posting_run_against_fixture_repo_produces_report():
         )
         assert response.status_code == 202
         run_id = response.json()["id"]
+        assert client.get(f"/runs/{run_id}").json()["status"] == "QUEUED"
 
-        # TestClient runs background tasks before returning.
+        # The API only queues; a worker picks the run up.
+        assert drain("test-worker") == 1
+
         body = client.get(f"/runs/{run_id}").json()
         assert body["status"] == "COMPLETED", body
 
         events = client.get(f"/runs/{run_id}/events").json()
         event_types = [event["type"] for event in events]
-        assert event_types[:2] == ["run_created", "run_started"]
+        assert event_types[:2] == ["run_created", "run_claimed"]
         assert event_types[-1] == "run_completed"
 
-    [report_path] = body["result"]["reports"]
-    assert FAILING_TEST in Path(report_path).read_text(encoding="utf-8")
+    [report_url] = body["result"]["reports"]
+    assert FAILING_TEST in httpx.get(report_url).json()["body"]
 
 
 def test_api_rejects_bad_input():

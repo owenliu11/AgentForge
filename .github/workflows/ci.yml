@@ -52,4 +52,22 @@ jobs:
         run: docker pull python:3.12-alpine
 
       - name: Test
-        run: uv run pytest
+        run: make test
+
+      - name: Kill drills
+        run: make drill
+
+  image:
+    # The same image runs api, worker, mock_effects, and migrations (and ships to ECR in Phase 4).
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Build image
+        run: docker build -t agentforge:ci .
+
+      - name: Smoke test image
+        run: |
+          docker run --rm agentforge:ci python -c "import app.main, app.worker, mock_effects.app"
+          docker run --rm agentforge:ci docker --version

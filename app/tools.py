@@ -8,6 +8,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+import httpx
+
 from app.config import settings
 
 MAX_READ_BYTES = 65_536
@@ -171,22 +173,7 @@ def tests_run(ctx: ToolContext, path: str = ".") -> dict[str, Any]:
     }
 
 
-def report_publish(
-    ctx: ToolContext,
-    path: str,
-    title: str = "AgentForge Report",
-    content: str = "",
-    include_last_result: bool = False,
-) -> dict[str, Any]:
-    """
-    Phase 1 placeholder.
-
-    In Phase 3 this becomes the effectful tool that posts to mock_effects
-    and is deduplicated by idempotency key.
-    """
-    target = _safe_path(ctx.reports_dir, path)
-    target.parent.mkdir(parents=True, exist_ok=True)
-
+def _render_report(ctx: ToolContext, title: str, content: str, include_last_result: bool) -> str:
     lines = [f"# {title}", ""]
 
     if content:
@@ -205,16 +192,59 @@ def report_publish(
 
         lines.append("")
 
-    if ctx.idempotency_key:
-        lines.append(f"Idempotency key: `{ctx.idempotency_key}`")
-        lines.append("")
+    return "\n".join(lines)
 
-    target.write_text("\n".join(lines), encoding="utf-8")
+
+def report_publish(
+    ctx: ToolContext,
+    path: str,
+    title: str = "AgentForge Report",
+    content: str = "",
+    include_last_result: bool = False,
+) -> dict[str, Any]:
+    """
+    The effectful tool: publish a report to the downstream service.
+
+    The request carries the call's idempotency key, and the downstream stores
+    one report per key, so re-running this after a crash can't publish twice.
+    """
+    # The report name is still model-controlled, so keep it a contained path.
+    _safe_path(ctx.reports_dir, path)
+
+    if not ctx.idempotency_key:
+        raise ToolError("report.publish requires an idempotency key")
+
+    body = _render_report(ctx, title, content, include_last_result)
+    base = settings.mock_effects_url.rstrip("/")
+
+    response = httpx.post(
+        f"{base}/reports",
+        json={"path": path, "title": title, "body": body},
+        headers={"Idempotency-Key": ctx.idempotency_key},
+        timeout=10,
+    )
+    response.raise_for_status()
+    report_id = response.json()["id"]
 
     return {
-        "report_path": str(target),
-        "bytes": target.stat().st_size,
+        "report_id": report_id,
+        "report_url": f"{base}/reports/{report_id}",
+        "path": path,
+        "bytes": len(body.encode("utf-8")),
     }
+
+
+def notify_post(ctx: ToolContext, message: str) -> dict[str, Any]:
+    """
+    An effect the downstream can't deduplicate (no idempotency key).
+
+    If a worker dies after sending but before saving the result, nobody knows
+    whether it was sent, so recovery fails the run with UNKNOWN_EFFECT.
+    """
+    base = settings.mock_effects_url.rstrip("/")
+    response = httpx.post(f"{base}/notify", json={"message": message[:2_000]}, timeout=10)
+    response.raise_for_status()
+    return {"delivered": True}
 
 
 TOOL_REGISTRY: dict[str, Callable[..., dict[str, Any]]] = {
@@ -222,6 +252,19 @@ TOOL_REGISTRY: dict[str, Callable[..., dict[str, Any]]] = {
     "files.search": files_search,
     "tests.run": tests_run,
     "report.publish": report_publish,
+    "notify.post": notify_post,
+}
+
+# How recovery treats an intent with no saved result:
+#   none    - no side effects; just run it again
+#   keyed   - side effect deduplicated downstream by idempotency key; re-run
+#   unkeyed - side effect can't be deduplicated; fail with UNKNOWN_EFFECT
+TOOL_EFFECTS: dict[str, str] = {
+    "files.read": "none",
+    "files.search": "none",
+    "tests.run": "none",
+    "report.publish": "keyed",
+    "notify.post": "unkeyed",
 }
 
 

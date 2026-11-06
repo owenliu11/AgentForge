@@ -1,6 +1,24 @@
 # Fixed project name so every checkout/worktree manages the same container and volume.
 name: agentforge
 
+# Shared settings for the api, worker, and mock_effects containers.
+# tests.run starts sibling containers through the host's Docker socket, and the
+# host resolves the -v path, so fixture repos are mounted at the same absolute
+# path inside the container as on the host (${PWD}).
+x-app: &app
+  build: .
+  image: agentforge:local
+  environment:
+    DATABASE_URL: postgresql://agentforge:agentforge@db:5432/agentforge
+    MOCK_EFFECTS_URL: http://mock_effects:8001
+    REPOS_ROOT: ${PWD}/tests/fixtures
+    MODEL_SCRIPT: ${PWD}/tests/fixtures/scripts/repo_analysis.yaml
+  volumes:
+    - ./tests/fixtures:${PWD}/tests/fixtures:ro
+  depends_on:
+    db:
+      condition: service_healthy
+
 services:
   db:
     image: postgres:16
@@ -19,6 +37,44 @@ services:
       timeout: 5s
       retries: 10
       start_period: 5s
+
+  # One-off: workers must not race to migrate on boot.
+  migrate:
+    <<: *app
+    command: ["alembic", "upgrade", "head"]
+    restart: "no"
+
+  mock_effects:
+    <<: *app
+    command: ["uvicorn", "mock_effects.app:app", "--host", "0.0.0.0", "--port", "8001"]
+    restart: unless-stopped
+    ports:
+      - "8001:8001"
+
+  api:
+    <<: *app
+    command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+
+  worker:
+    <<: *app
+    command: ["python", "-m", "app.worker"]
+    restart: unless-stopped
+    deploy:
+      replicas: 3
+    volumes:
+      - ./tests/fixtures:${PWD}/tests/fixtures:ro
+      - /var/run/docker.sock:/var/run/docker.sock
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      mock_effects:
+        condition: service_started
 
 volumes:
   agentforge_pgdata:

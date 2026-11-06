@@ -1,0 +1,8 @@
+# A run whose only side effect has no idempotency key.
+- tool: notify.post
+  args:
+    message: "AgentForge run finished"
+
+- finish:
+    result:
+      summary: "Sent one notification."

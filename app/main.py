@@ -2,19 +2,26 @@
 import uuid
 from datetime import datetime
 
-from fastapi import BackgroundTasks, FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 
-from app.agent import create_run, run_agent
+from app.agent import create_run
+from app.config import settings
 from app.db import SessionLocal, ping_db
 from app.models import AgentRun, RunEvent
 
 app = FastAPI(
     title="AgentForge",
-    version="0.1.0",
+    version="0.3.0",
 )
+
+
+if settings.demo_mode:
+    from app.demo import router as demo_router
+
+    app.include_router(demo_router)
 
 
 class RunRequest(BaseModel):
@@ -63,7 +70,7 @@ def health() -> JSONResponse:
 
 
 @app.post("/runs", status_code=202)
-def post_run(req: RunRequest, background_tasks: BackgroundTasks):
+def post_run(req: RunRequest):
     try:
         run_id = create_run(
             objective=req.objective,
@@ -73,10 +80,7 @@ def post_run(req: RunRequest, background_tasks: BackgroundTasks):
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
-    # Phase 1: run in-process after the response is sent.
-    # Phase 2 replaces this with workers claiming QUEUED runs.
-    background_tasks.add_task(run_agent, run_id)
-
+    # The API only queues the run; any worker can claim it (app/worker.py).
     return {"id": str(run_id), "status": "QUEUED"}
 
 
