@@ -172,7 +172,9 @@ def _load_report(session: DemoSession) -> None:
         reports = (run.result or {}).get("reports") or []
 
     if reports:
-        session.report = httpx.get(reports[0], timeout=5).json()["body"]
+        report_id = reports[0].rsplit("/", 1)[-1]
+        url = f"{settings.mock_effects_url.rstrip('/')}/reports/{report_id}"
+        session.report = httpx.get(url, timeout=5).json()["body"]
 
 
 def _drive(session: DemoSession) -> None:

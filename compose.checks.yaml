@@ -1,0 +1,15 @@
+# Only for scripts/check.sh. Each invocation uses a unique Compose project.
+services:
+  db:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: agentforge
+      POSTGRES_PASSWORD: agentforge
+      POSTGRES_DB: agentforge_test
+    ports:
+      - "127.0.0.1::5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U agentforge -d agentforge_test"]
+      interval: 1s
+      timeout: 3s
+      retries: 30

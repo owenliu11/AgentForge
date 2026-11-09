@@ -24,6 +24,7 @@ COPY migrations ./migrations
 COPY app ./app
 COPY mock_effects ./mock_effects
 COPY tests/fixtures ./tests/fixtures
+COPY drills/scripts ./drills/scripts
 RUN uv sync --frozen --no-dev
 
 EXPOSE 8000 8001

@@ -29,7 +29,7 @@ def run_migrations() -> None:
     alembic_cfg.set_main_option("script_location", str(PROJECT_ROOT / "migrations"))
     alembic_cfg.set_main_option(
         "sqlalchemy.url",
-        settings.sqlalchemy_database_url,
+        settings.alembic_database_url,
     )
     command.upgrade(alembic_cfg, "head")
 

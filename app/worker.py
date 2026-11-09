@@ -15,6 +15,8 @@ import socket
 import time
 import uuid
 
+import httpx
+
 from app.agent import execute_run
 from app.config import settings
 from app.db import SessionLocal
@@ -27,7 +29,21 @@ log = logging.getLogger(__name__)
 
 
 def default_worker_id() -> str:
-    return f"{socket.gethostname()}-{os.getpid()}"
+    """
+    A unique id. On ECS it's the task id, so `aws ecs stop-task` can target the
+    owner of a run. Containers sharing a host all have PID 1, so a random suffix
+    keeps the fallback unique.
+    """
+    metadata_uri = os.environ.get("ECS_CONTAINER_METADATA_URI_V4")
+
+    if metadata_uri:
+        try:
+            task_arn = httpx.get(f"{metadata_uri}/task", timeout=5).json()["TaskARN"]
+            return task_arn.rsplit("/", 1)[-1]
+        except (httpx.HTTPError, KeyError, ValueError):
+            log.warning("no ECS task metadata; using a generated worker id")
+
+    return f"{socket.gethostname()}-{os.getpid()}-{uuid.uuid4().hex[:6]}"
 
 
 def drain(worker_id: str, model: Model | None = None, run_id: uuid.UUID | None = None) -> int:

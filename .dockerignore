@@ -6,3 +6,7 @@
 .ruff_cache
 reports
 .env
+infra
+
+.env.*
+.DS_Store

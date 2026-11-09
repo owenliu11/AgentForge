@@ -1,0 +1,58 @@
+name: Optional AWS image rollout
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write # lets the job sign in to AWS with OIDC; no stored AWS keys
+
+concurrency:
+  group: agentforge-aws-rollout
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    if: github.ref == 'refs/heads/main' && vars.AWS_DEPLOY_ROLE_ARN != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      AWS_REGION: ${{ vars.AWS_REGION || 'us-east-2' }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Sign in to AWS with OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      # `make destroy` runs after every session, so usually nothing is up.
+      - name: Check whether the stack is up
+        id: stack
+        run: |
+          if URI="$(aws ecr describe-repositories --repository-names agentforge \
+            --query 'repositories[0].repositoryUri' --output text 2>/dev/null)"; then
+            echo "repository=$URI" >> "$GITHUB_OUTPUT"
+          else
+            echo "::notice::The stack isn't deployed, so there's nothing to update."
+          fi
+
+      - name: Sign in to ECR
+        if: steps.stack.outputs.repository != ''
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build and push the image
+        if: steps.stack.outputs.repository != ''
+        run: |
+          docker build --tag "${{ steps.stack.outputs.repository }}:latest" .
+          docker push "${{ steps.stack.outputs.repository }}:latest"
+
+      - name: Roll out
+        if: steps.stack.outputs.repository != ''
+        run: |
+          for service in api mock_effects worker; do
+            aws ecs update-service --cluster agentforge --service "$service" \
+              --force-new-deployment --query 'service.serviceName' --output text
+          done

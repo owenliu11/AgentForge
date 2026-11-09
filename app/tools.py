@@ -164,6 +164,9 @@ def tests_run(ctx: ToolContext, path: str = ".") -> dict[str, Any]:
         subprocess.run(["docker", "rm", "-f", container_name], capture_output=True)
         raise ToolError("tests.run timed out") from exc
 
+    if proc.returncode not in (0, 1):
+        raise ToolError(f"tests.run could not execute the suite (exit {proc.returncode})")
+
     output = f"{proc.stdout or ''}\n{proc.stderr or ''}"
 
     return {
@@ -187,8 +190,12 @@ def _render_report(ctx: ToolContext, title: str, content: str, include_last_resu
         if failed_tests:
             lines.append("## Failing tests")
             lines.extend([f"- {test_name}" for test_name in failed_tests])
+        elif last_result.get("error"):
+            lines.append(f"Test execution failed: {last_result['error']}")
+        elif last_result.get("returncode") == 0:
+            lines.append("Test command completed successfully (exit 0).")
         else:
-            lines.append("All tests passed.")
+            lines.append("Test outcome is inconclusive; inspect the tool result.")
 
         lines.append("")
 
@@ -228,7 +235,9 @@ def report_publish(
 
     return {
         "report_id": report_id,
-        "report_url": f"{base}/reports/{report_id}",
+        "report_url": (
+            f"{(settings.mock_effects_public_url or base).rstrip('/')}/reports/{report_id}"
+        ),
         "path": path,
         "bytes": len(body.encode("utf-8")),
     }
