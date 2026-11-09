@@ -12,6 +12,7 @@ from pathlib import Path
 import httpx
 import pytest
 from sqlalchemy import func, select, text
+from sqlalchemy.engine import make_url
 
 from app.config import settings
 from app.db import SessionLocal, run_migrations
@@ -39,8 +40,21 @@ def wait_for(predicate, timeout: float = 30.0, interval: float = 0.1, what: str 
     raise AssertionError(f"Timed out after {timeout}s waiting for {what}")
 
 
+def require_test_database(url: str, allow_reset: str | None) -> None:
+    """Refuse destructive fixtures against a normal development/cloud database."""
+    database = make_url(url).database or ""
+    if allow_reset != "1" or not database.endswith("_test"):
+        raise RuntimeError(
+            "Destructive tests require a database ending in _test and "
+            "AGENTFORGE_ALLOW_TEST_RESET=1. Use make test or make drill."
+        )
+
+
 @pytest.fixture(scope="session")
 def migrated_db():
+    require_test_database(
+        settings.sqlalchemy_database_url, os.environ.get("AGENTFORGE_ALLOW_TEST_RESET")
+    )
     run_migrations()
 
 

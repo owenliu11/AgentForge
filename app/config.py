@@ -14,9 +14,9 @@ class Settings(BaseSettings):
 
     # Runs may only point at repos inside this directory.
     repos_root: Path = FIXTURES
-    # FakeModel script; the real LLM adapter replaces this in Phase 4/5.
+    # Deterministic FakeModel script; no live LLM adapter is shipped.
     model_script: Path = FIXTURES / "scripts" / "repo_analysis.yaml"
-    # report.publish writes to <reports_dir>/<run_id>/.
+    # Report paths are validated beneath this root; content lives in mock_effects.
     reports_dir: Path = PROJECT_ROOT / "reports"
 
     sandbox_image: str = "python:3.12-alpine"
@@ -33,6 +33,8 @@ class Settings(BaseSettings):
 
     # report.publish and notify.post send their side effects here (Phase 3).
     mock_effects_url: str = "http://localhost:8001"
+    # Optional address returned to host clients when the transport URL is container-only.
+    mock_effects_public_url: str = ""
 
     # Serves the demo page, which starts worker processes. Local use only: leave
     # this off anywhere the API is reachable by other people.
@@ -85,6 +87,11 @@ class Settings(BaseSettings):
             )
 
         return url
+
+    @property
+    def alembic_database_url(self) -> str:
+        # Alembic's config treats % as interpolation, and an escaped password has %.
+        return self.sqlalchemy_database_url.replace("%", "%%")
 
 
 settings = Settings()

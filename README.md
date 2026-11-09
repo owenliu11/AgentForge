@@ -1,115 +1,170 @@
 # AgentForge
 
-Crash-safe distributed AI-agent runtime built with Python, FastAPI, and PostgreSQL.
+A durable agent-workflow runtime built with Python, FastAPI and PostgreSQL.
+Workers claim queued runs, save decisions before executing tools, and resume work after
+worker crashes. A scripted `FakeModel` makes recovery behavior reproducible without an
+LLM API key.
 
-Kill a worker at any point and another worker finishes the run, with zero duplicate side effects.
+**Current scope:** a local portfolio runtime with real PostgreSQL coordination, Docker
+execution, recovery drills and an isolated target for [TestForge](docs/TESTFORGE.md).
+The AWS stack is an [optional deployment demonstration](infra/README.md).
 
-## Status: Phase 3 (v0.3)
+## What it demonstrates
 
-- **Durable runs (Phase 1).** Four tables (`agent_runs`, `run_steps`, `tool_calls`, `run_events`); a decision-first agent loop; `FakeModel` replays scripted decisions; tools are path-contained and `tests.run` runs in `docker run --network none` with the repo read-only.
-- **Workers and leases (Phase 2).** Workers claim runs straight from Postgres with `FOR UPDATE SKIP LOCKED`, renew a 30 s lease every 10 s, and fence every write with `lease_generation`. A zombie worker's write updates 0 rows and raises `LostLease`.
-- **Recovery and kill drills (Phase 3).** A claim resumes at the first missing record. `report.publish` posts to `mock_effects` with an idempotency key; `notify.post` has no key, so an unknown outcome fails the run with `UNKNOWN_EFFECT`. A run claimed more than 3 times fails as `POISON_RUN`. `make drill` kills real worker processes at four crash points.
+- **Durable execution:** decisions, tool intents, results and events are persisted in PostgreSQL.
+- **Concurrent workers:** `FOR UPDATE SKIP LOCKED` claims, renewable leases and generation
+  fencing prevent stale owners from committing results.
+- **Recovery semantics:** read-only tools can run again; keyed effects reuse their idempotency
+  key; an uncertain unkeyed effect ends with `UNKNOWN_EFFECT` rather than being sent again.
+- **Failure evidence:** repeatable worker-kill, stale-worker and poison-run drills, plus ordered
+  run events and an inspectable downstream report.
 
-## Quickstart
+Execution is **at least once**. A keyed report is applied once only while the downstream
+service retains its idempotency record. The included `mock_effects` service keeps that
+record in memory: restarting it loses reports and deduplication state. AgentForge does
+not promise exactly-once execution or recovery from every kind of failure.
 
-Fastest way to see it: `make install`, then `make demo`, then open <http://localhost:8000/demo>. Pick a scenario and watch real workers crash and recover in the browser.
+## Architecture
 
-[RUNNING.md](RUNNING.md) is a step-by-step walkthrough: run the tests and drills, watch a run, and crash a worker by hand to see recovery.
+```mermaid
+flowchart LR
+    Client[API client / TestForge] --> API[FastAPI]
+    API --> DB[(PostgreSQL runs and events)]
+    DB <--> Workers[Worker processes]
+    Script[Versioned FakeModel script] --> Workers
+    Workers --> Sandbox[Docker unittest container]
+    Workers --> Effects[Mock downstream: keyed reports / unkeyed notifications]
+    Client --> Effects
+```
+
+The API queues runs; workers execute them. A worker records the decision, records the tool
+intent, performs the tool call, then commits the result/checkpoint. Each database write is
+fenced by the active lease generation. The database clock controls lease expiry.
+
+## Quick start: isolated API target
+
+Prerequisites: Docker with Compose v2 and a running daemon, `uv`, and `make`.
+The project uses Python 3.12 and committed `uv.lock`. The first install/build downloads
+packages and images; runtime uses the checked-in model script and local mock service.
 
 ```bash
 make install
-make up        # Postgres 16 on localhost:5433
-make migrate
-make mock      # mock_effects on localhost:8001   (shell 2)
-make worker    # one worker; start more in more shells
-make run       # API on localhost:8000             (shell 3)
+make testforge-up
+make testforge-smoke
 ```
 
-Or everything in containers (one image from the `Dockerfile`), with three workers: `make up-all`. Workers start `tests.run` sandboxes through the host's Docker socket.
-
-Submit a run against the fixture repo:
+Open API documentation at <http://127.0.0.1:18010/docs>. The smoke check submits real runs,
+waits for workers, verifies the known failing fixture test is reported, and checks rejection
+and step-limit behavior. A run reaching `COMPLETED` means the workflow finished; the
+fixture intentionally contains a failing test.
 
 ```bash
-curl -s -X POST localhost:8000/runs -H 'content-type: application/json' \
-  -d '{"objective": "Find failing tests", "repo_path": "sample_repo"}'
-curl -s localhost:8000/runs/<id>
-curl -s localhost:8000/runs/<id>/events
-curl -s localhost:8001/stats      # reports applied, duplicates suppressed
+curl -fsS http://127.0.0.1:18010/health
+curl -fsS -X POST http://127.0.0.1:18010/runs \
+  -H 'Content-Type: application/json' \
+  -d '{"objective":"Analyze fixture","repo_path":"sample_repo"}'
+# Use the returned id:
+curl -fsS http://127.0.0.1:18010/runs/REPLACE_WITH_RUN_ID
+curl -fsS http://127.0.0.1:18010/runs/REPLACE_WITH_RUN_ID/events
 ```
 
-`repo_path` is relative to `REPOS_ROOT`, which defaults to `tests/fixtures`.
-
-## Tests and drills
+Evidence is saved under `reports/testforge/` (ignored by Git). Shut down the isolated target
+and delete its test data when finished:
 
 ```bash
-make lint
-make test      # unit + lease tests; needs `make up` and Docker
-make drill     # kill drills with real worker processes
+make testforge-down
 ```
 
-Both truncate the tables in `DATABASE_URL`. If your local database predates Phase 1, run `make reset-db` once.
+This helper operates only on its `agentforge-testforge` project namespace, not the normal
+`agentforge` development database. Alternate ports and concurrent runs are documented in
+[the TestForge contract](docs/TESTFORGE.md).
 
-| Drill | What happens | Asserted |
-|---|---|---|
-| `after_decision`, `after_intent`, `after_effect`, `before_commit` | Worker A calls `os._exit(137)` at that line on the `report.publish` step; worker B claims generation 2 and resumes | Run COMPLETED, 5 steps, one tool-call row per step, report applied exactly once, saved decision replayed |
-| Stale worker | A freezes (`SIGSTOP`, heartbeat included) right after publishing; B takes over and finishes; A is resumed | A's write is fenced off (`LostLease`), report applied once, duplicate suppressed |
-| Poison run | Three workers in a row crash on the same run | 4th claim fails it as `POISON_RUN`, `attempts = 4` |
-| Unknown effect | A crashes right after the unkeyed `notify.post` | B fails the run with `UNKNOWN_EFFECT`; one notification, never re-sent |
-| Recovery time | Kill to next claim | Within the lease length plus poll interval |
+## Interactive recovery demo
 
-Drills use a 2 s lease (`LEASE_SECONDS`) so they run in about 30 seconds.
-
-### Recovery time
-
-Measured with `make measure`: the `after_effect` crash, repeated 20 times with real worker processes, from the worker's death to the next worker's claim, using the database clock. Raw samples are in [drills/results/recovery.json](drills/results/recovery.json).
-
-| Lease | Runs | p50 | p95 | Max | Extra reports applied |
-|---|---|---|---|---|---|
-| 2 s | 20 | 2.01 s | 2.03 s | 2.04 s | 0 |
-
-Recovery time tracks the lease length, because the next worker can only claim once the lease expires. With the default 30 s lease, expect about 30 s. A shorter lease recovers faster, but a brief stall is more likely to trigger an unnecessary takeover. Measured on a local machine.
-
-## Design
-
-### Claim, heartbeat, fence
-
-The claim picks a queued run or one whose lease expired, so it is also the recovery trigger; there is no separate queue or reconciler.
-
-```sql
-UPDATE agent_runs
-SET lease_owner = :worker, lease_generation = lease_generation + 1,
-    lease_expires_at = now() + make_interval(secs => :lease_seconds),
-    status = 'RUNNING', attempts = attempts + 1
-WHERE id = (SELECT id FROM agent_runs
-            WHERE status = 'QUEUED' OR (status = 'RUNNING' AND lease_expires_at < now())
-            ORDER BY created_at FOR UPDATE SKIP LOCKED LIMIT 1)
-RETURNING id, lease_generation;
+```bash
+make install
+make demo
 ```
 
-Every worker transaction starts with `UPDATE agent_runs ... WHERE id = :run_id AND lease_generation = :gen`; 0 rows means `LostLease` and a rollback. All times use the database clock.
+Open <http://localhost:8000/demo>. Choose a scenario and inspect real worker state,
+lease generation, events and effect counts. Ports 8000, 8001 and 5433 must be available.
+Stop other workers against that development database before using this single-session demo.
+`DEMO_MODE` is disabled by default; the demo starts worker processes and resets mock counters.
+See [RUNNING.md](RUNNING.md) for the multi-terminal and container workflows.
 
-### Commit order and recovery
+## Verify the release
 
-Each step writes, one fenced transaction each: (1) decision, (2) tool intent with its key, (3) run the tool, (4) result plus checkpoint.
+```bash
+make verify           # lint, tests and real-process crash drills
+make testforge-up
+make testforge-smoke  # black-box API -> worker -> sandbox -> report check
+make testforge-down
+make tf-check         # optional AWS configuration validation; no deployment
+```
 
-| Crash point | What recovery does |
+`make test`, `make drill` and `make verify` create a fresh PostgreSQL test container on a
+random loopback port, save JUnit/logs, and remove only that test stack on exit. Tests reject
+normal database names and require explicit reset opt-in before destructive fixtures run.
+Do not run these fixtures against development or production data. See
+[release verification](docs/RELEASE_CHECKLIST.md) for the checks performed for this update.
+
+CI runs isolated tests/drills, the container acceptance check and Terraform validation with
+a mocked AWS provider. CI needs no AWS credentials or live model credentials. Reports are
+uploaded even on failure. The optional AWS image rollout is manually triggered.
+
+## API contract
+
+| Route | Result |
 |---|---|
-| Before the decision is saved | Ask the model again |
-| After decision, before intent | Replay the saved decision; don't re-ask the model |
-| After intent, before result, keyed or read-only tool | Re-run with the same key; the downstream dedupes it |
-| After intent, before result, unkeyed tool | Mark UNKNOWN; fail with `UNKNOWN_EFFECT` |
-| After result | Continue with the next step |
+| `GET /health` | `200 {status: "ok", db: "up"}` or `503` with degraded/down |
+| `POST /runs` | `202 {id, status: "QUEUED"}`; invalid paths/input return `422` |
+| `GET /runs/{id}` | Run state, lease generation/owner, attempts, result and error; missing run `404` |
+| `GET /runs/{id}/events` | Ordered event array with `seq`, `type`, `payload`, `created_at` |
 
-Idempotency key: `sha256(run_id | step_seq | tool | canonical_json(args))`.
+`repo_path` is relative to `REPOS_ROOT`. `max_steps` defaults to 10 and accepts 1-50.
+There are no authentication or multi-tenant controls in this portfolio API.
+The full adapter boundary, readiness procedure and test matrix are in
+[docs/TESTFORGE.md](docs/TESTFORGE.md).
 
-### Failure semantics
+## Recovery behavior
 
-Execution is at-least-once. Side effects are effectively-once for tools whose downstream dedupes by idempotency key. For tools that can't take a key, AgentForge refuses to guess and fails the run.
+| Missing durable record | Recovery |
+|---|---|
+| Decision | Ask the configured model again |
+| Intent after a saved decision | Replay the saved decision |
+| Result for a read-only/keyed tool | Re-execute; preserve the original idempotency key |
+| Result for an unkeyed tool | Fail with `UNKNOWN_EFFECT`; outcome is uncertain |
+| Nothing missing for a completed step | Continue with the next step |
 
-Infrastructure errors (database unreachable, downstream connection error or 5xx) don't fail a run: the worker drops it without writing, the lease expires, and the next claim resumes it. The lease length is the backoff and the attempts cap bounds the retries. Errors that are the run's own fault (bad decision, step cap, 4xx from a downstream) fail it immediately.
+Idempotency keys use `sha256(run_id | step_seq | tool | canonical_json(args))`.
+A run exceeding the claim-attempt limit fails with `POISON_RUN`. Infrastructure errors
+release execution without inventing a result; the next eligible claim resumes after lease
+expiry. Model/step-limit/contract errors can terminate the run.
 
-### Configuration
+## Configuration and limits
 
-All settings are env vars (see `.env.example`). Locally, `DATABASE_URL` points at the compose Postgres. In the cloud, set `DB_HOST`, `DB_PORT`, `DB_NAME`, `DB_USERNAME`, and `DB_PASSWORD` instead (for example injected from the RDS-managed secret); when `DB_HOST` is set it takes precedence.
+See [.env.example](.env.example). `DATABASE_URL` configures local PostgreSQL; when nonempty,
+`DB_HOST` and the other `DB_*` fields take precedence for cloud operation. `MODEL_SCRIPT`
+selects the deterministic decision script; objectives do not change that script's decisions.
+`MOCK_EFFECTS_URL` is the worker's transport address; optional `MOCK_EFFECTS_PUBLIC_URL`
+is the report address exposed to clients.
 
-CI (`.github/workflows/ci.yml`) runs ruff, `make test`, and `make drill` against a Postgres service container, and builds and smoke-tests the Docker image.
+- Default lease/heartbeat: 30/10 seconds. Recovery latency depends on lease expiry, polling,
+  scheduling and tool duration; there is no fixed production recovery SLA.
+- The historical [recovery sample](drills/results/recovery.json) belongs to its recorded
+  local experiment. It is not a fresh cloud benchmark.
+- `tests.run` runs Python unittest in a network-disabled container with a read-only fixture
+  mount. Worker access to the host Docker socket is privileged; this is not a hardened
+  multi-tenant execution service. Use trusted fixture repositories for this demo.
+- Mock reports are ephemeral. A production downstream needs durable idempotency storage.
+- There is no live LLM adapter, production auth/TLS, cancellation API or browser acceptance
+  suite yet. These are outside the current TestForge preparation scope.
+
+## Project map
+
+`app/`: runtime, API, leases and tools; `mock_effects/`: controlled downstream;
+`tests/`: focused tests and fixtures; `drills/`: real-process failure drills;
+`scripts/`: isolated verification and external smoke example; `infra/`: optional AWS stack.
+
+AgentForge is the application under test. TestForge is the separate reusable test platform;
+its shared core should not import AgentForge's internal Python modules.

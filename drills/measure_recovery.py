@@ -2,7 +2,7 @@
 Measure recovery time: from a worker's death to the next worker's claim.
 
 Runs the after_effect crash drill N times with real worker processes and writes
-the samples and percentiles to drills/results/recovery.json. Both timestamps
+the samples and percentiles under reports/. Both timestamps
 come from the database clock. Uses the same 2 s lease as the drills, and recovery
 time tracks the lease length, so report the two together.
 
@@ -11,6 +11,7 @@ time tracks the lease length, so report the two together.
 
 import argparse
 import json
+import os
 import statistics
 import subprocess
 import sys
@@ -23,18 +24,19 @@ from sqlalchemy import text
 
 from app.agent import create_run
 from app.config import settings
-from app.db import SessionLocal
+from app.db import SessionLocal, run_migrations
 from tests.support import (
     ROOT,
     TERMINAL,
     _free_port,
     load_run,
+    require_test_database,
     run_status,
     start_worker,
     wait_for,
 )
 
-RESULTS = Path(__file__).parent / "results" / "recovery.json"
+RESULTS = Path(os.environ.get("AGENTFORGE_MEASUREMENT_OUTPUT", "reports/recovery.json"))
 LEASE_SECONDS = 2
 
 
@@ -93,6 +95,12 @@ def main() -> None:
     parser.add_argument("--runs", type=int, default=20)
     args = parser.parse_args()
 
+    if args.runs < 2:
+        parser.error("--runs must be at least 2")
+    require_test_database(
+        settings.sqlalchemy_database_url, os.environ.get("AGENTFORGE_ALLOW_TEST_RESET")
+    )
+    run_migrations()
     mock = start_mock_effects()
     samples = []
 
@@ -117,7 +125,7 @@ def main() -> None:
         "samples_seconds": samples,
     }
 
-    RESULTS.parent.mkdir(exist_ok=True)
+    RESULTS.parent.mkdir(parents=True, exist_ok=True)
     RESULTS.write_text(json.dumps(results, indent=2) + "\n", encoding="utf-8")
     print(f"p50 {results['p50_seconds']} s, p95 {results['p95_seconds']} s -> {RESULTS}")
 

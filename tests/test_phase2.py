@@ -5,6 +5,7 @@ import threading
 import time
 from collections import Counter
 
+import httpx
 import pytest
 
 from app.agent import create_run, execute_run
@@ -12,6 +13,7 @@ from app.config import settings
 from app.leases import Heartbeat, LostLease, claim, fenced, renew
 from app.model_interface import FakeModel
 from app.models import AgentRun
+from app.worker import default_worker_id
 from tests.support import (
     count_status,
     effect_stats,
@@ -158,3 +160,22 @@ def test_twenty_runs_across_three_workers_with_no_run_owned_twice(tmp_path):
     stats = effect_stats()
     assert stats["reports_applied"] == 20
     assert stats["duplicates_suppressed"] == 0
+
+
+def test_worker_ids_are_unique_on_a_shared_host(monkeypatch):
+    monkeypatch.delenv("ECS_CONTAINER_METADATA_URI_V4", raising=False)
+    monkeypatch.setattr("os.getpid", lambda: 1)  # every container is PID 1
+
+    assert default_worker_id() != default_worker_id()
+
+
+def test_worker_id_is_the_ecs_task_id(monkeypatch):
+    monkeypatch.setenv("ECS_CONTAINER_METADATA_URI_V4", "http://metadata.test")
+    response = httpx.Response(
+        200,
+        json={"TaskARN": "arn:aws:ecs:us-east-1:123:task/agentforge/abc123"},
+        request=httpx.Request("GET", "http://metadata.test/task"),
+    )
+    monkeypatch.setattr("app.worker.httpx.get", lambda url, timeout: response)
+
+    assert default_worker_id() == "abc123"

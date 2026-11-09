@@ -1,0 +1,77 @@
+# Independent from docker-compose.yml; never mounts the development database.
+# Use scripts/testforge.sh to supply the absolute fixture path and project name.
+x-app: &app
+  build: .
+  image: ${AGENTFORGE_TEST_IMAGE:-agentforge:testforge}
+  environment: &environment
+    DATABASE_URL: postgresql://agentforge:agentforge@db:5432/agentforge_test
+    DB_HOST: ""
+    MOCK_EFFECTS_URL: http://mock_effects:8001
+    MOCK_EFFECTS_PUBLIC_URL: http://127.0.0.1:${TF_EFFECTS_PORT:-18011}
+    REPOS_ROOT: ${AGENTFORGE_REPOS_ROOT:?Set the absolute host fixture path}
+    MODEL_SCRIPT: ${AGENTFORGE_REPOS_ROOT}/scripts/repo_analysis.yaml
+    SANDBOX_IMAGE: ${SANDBOX_IMAGE:-python:3.12-alpine}
+    DEMO_MODE: "false"
+    LEASE_SECONDS: "3"
+    HEARTBEAT_SECONDS: "1"
+    POLL_SECONDS: "0.2"
+  volumes:
+    - ${AGENTFORGE_REPOS_ROOT}:${AGENTFORGE_REPOS_ROOT}:ro
+
+services:
+  db:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: agentforge
+      POSTGRES_PASSWORD: agentforge
+      POSTGRES_DB: agentforge_test
+    volumes:
+      - test_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U agentforge -d agentforge_test"]
+      interval: 1s
+      timeout: 3s
+      retries: 30
+  migrate:
+    <<: *app
+    command: ["alembic", "upgrade", "head"]
+    depends_on:
+      db:
+        condition: service_healthy
+  mock_effects:
+    <<: *app
+    command: ["uvicorn", "mock_effects.app:app", "--host", "0.0.0.0", "--port", "8001"]
+    ports:
+      - "127.0.0.1:${TF_EFFECTS_PORT:-18011}:8001"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8001/stats', timeout=2)"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+  api:
+    <<: *app
+    command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+    ports:
+      - "127.0.0.1:${TF_API_PORT:-18010}:8000"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=2)"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+  worker:
+    <<: *app
+    command: ["python", "-m", "app.worker"]
+    volumes:
+      - ${AGENTFORGE_REPOS_ROOT}:${AGENTFORGE_REPOS_ROOT}:ro
+      - /var/run/docker.sock:/var/run/docker.sock
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      mock_effects:
+        condition: service_healthy
+
+volumes:
+  test_data:

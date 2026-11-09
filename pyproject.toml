@@ -32,6 +32,7 @@ packages = ["app", "mock_effects"]
 line-length = 100
 target-version = "py312"
 exclude = [
+    ".terraform",
     ".venv",
     ".git",
     ".pytest_cache",

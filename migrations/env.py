@@ -11,7 +11,7 @@ target_metadata = Base.metadata
 if not config.get_main_option("sqlalchemy.url"):
     config.set_main_option(
         "sqlalchemy.url",
-        settings.sqlalchemy_database_url,
+        settings.alembic_database_url,
     )
 
 

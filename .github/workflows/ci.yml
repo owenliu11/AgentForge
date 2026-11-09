@@ -2,72 +2,68 @@ name: CI
 
 on:
   push:
-    branches:
-      - main
+    branches: [main]
   pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
 
 jobs:
   test:
     runs-on: ubuntu-latest
-
-    services:
-      postgres:
-        image: postgres:16
-        env:
-          POSTGRES_USER: agentforge
-          POSTGRES_PASSWORD: agentforge
-          POSTGRES_DB: agentforge
-        ports:
-          - 5432:5432
-        options: >-
-          --health-cmd "pg_isready -U agentforge -d agentforge"
-          --health-interval 5s
-          --health-timeout 5s
-          --health-retries 10
-
-    env:
-      DATABASE_URL: postgresql://agentforge:agentforge@localhost:5432/agentforge
-
+    timeout-minutes: 20
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Setup uv
-        uses: astral-sh/setup-uv@v5
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
         with:
           enable-cache: true
+      - run: uv python install 3.12
+      - run: uv sync --frozen --group dev
+      - name: Lint and run isolated tests plus recovery drills
+        run: make verify
+      - name: Upload test evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: agentforge-checks
+          path: reports/checks/
+          retention-days: 14
 
-      - name: Install Python 3.12
-        run: uv python install 3.12
-
-      - name: Install dependencies
-        run: uv sync --group dev
-
-      - name: Lint
-        run: |
-          uv run ruff check .
-          uv run ruff format --check .
-
-      - name: Pull sandbox image
-        run: docker pull python:3.12-alpine
-
-      - name: Test
-        run: make test
-
-      - name: Kill drills
-        run: make drill
-
-  image:
-    # The same image runs api, worker, mock_effects, and migrations (and ships to ECR in Phase 4).
+  acceptance:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - run: uv python install 3.12
+      - run: uv sync --frozen --group dev
+      - name: Build and start isolated TestForge target
+        run: make testforge-up
+      - name: Exercise API, worker, sandbox and report service
+        run: make testforge-smoke
+      - name: Save diagnostics and remove test volumes
+        if: always()
+        run: make testforge-down
+      - name: Upload acceptance evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: agentforge-testforge-readiness
+          path: reports/testforge/
+          retention-days: 14
 
-      - name: Build image
-        run: docker build -t agentforge:ci .
-
-      - name: Smoke test image
-        run: |
-          docker run --rm agentforge:ci python -c "import app.main, app.worker, mock_effects.app"
-          docker run --rm agentforge:ci docker --version
+  terraform:
+    # Validation only. No AWS account, credentials, apply, or cloud resources.
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      TF_VAR_region: us-east-2
+      TF_VAR_allowed_cidr: 203.0.113.0/32
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_wrapper: false
+      - name: Format, validate and test with a mocked provider
+        run: make tf-check

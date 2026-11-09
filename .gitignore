@@ -8,6 +8,8 @@ __pycache__/
 
 # Environment
 .env
+.env.*
+!.env.example
 
 # Local data
 .pgdata/
@@ -19,3 +21,11 @@ reports/
 
 # Claude Code worktrees
 .claude/worktrees/
+
+# Terraform (the provider lock file is committed)
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfvars
+*.tfplan
+crash.log
